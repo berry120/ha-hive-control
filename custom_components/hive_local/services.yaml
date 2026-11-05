@@ -1,0 +1,188 @@
+boost:
+  name: Heat boost
+  description: Start Hive's native boost. Omitted values use the integration defaults.
+  fields:
+    entry_id: &entry
+      name: Hive installation
+      required: true
+      selector:
+        config_entry:
+          integration: hive_local
+    minutes:
+      name: Duration
+      selector:
+        number:
+          min: 1
+          max: 360
+          step: 1
+          unit_of_measurement: min
+          mode: box
+    temperature: &target
+      name: Temperature
+      selector:
+        number:
+          min: 5
+          max: 32
+          step: 0.5
+          unit_of_measurement: °C
+          mode: box
+resume_schedule:
+  name: Resume schedule
+  description: End boost or Off and return to Hive's onboard schedule in one combined write.
+  fields:
+    entry_id: *entry
+"off":
+  name: Turn off
+  description: Select Off on the receiver.
+  fields:
+    entry_id: *entry
+set_target:
+  name: Set heating target
+  description: Change the target in the current mode. The schedule may subsequently change it again.
+  fields:
+    entry_id: *entry
+    temperature:
+      <<: *target
+      required: true
+manual:
+  name: Hold manually
+  description: Hold a heating target until the mode is changed.
+  fields:
+    entry_id: *entry
+    temperature:
+      <<: *target
+      required: true
+read_schedule:
+  name: Read one day's schedule
+  description: Read the complete day and return the revision required to save it.
+  fields:
+    entry_id: *entry
+    day: &day
+      name: Day mask
+      description: "Sunday=1, Monday=2, Tuesday=4, Wednesday=8, Thursday=16, Friday=32, Saturday=64."
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 64
+          mode: box
+set_schedule:
+  name: Save one day's schedule
+  description: Replace a complete day after checking its revision, then verify by reading back. Never automatically retries the write.
+  fields:
+    entry_id: *entry
+    day: *day
+    revision:
+      name: Revision
+      description: Copy the revision returned by read_schedule for this day.
+      required: true
+      selector:
+        text:
+    transitions:
+      name: Complete day
+      description: 'List of {time: "HH:MM", temperature: 18.5} objects. Use null for Off.'
+      required: true
+      selector:
+        object:
+read_holiday:
+  name: Read holiday settings
+  description: Read the enabled flag, stored interval and away temperature from the receiver.
+  fields:
+    entry_id: *entry
+set_holiday_temperature:
+  name: Set holiday temperature
+  description: Change the stored holiday temperature in whole degrees. This does not enable a holiday.
+  fields:
+    entry_id: *entry
+    temperature: &holiday_target
+      name: Away temperature
+      required: true
+      selector:
+        number:
+          min: 5
+          max: 32
+          step: 1
+          unit_of_measurement: °C
+          mode: box
+cancel_holiday:
+  name: Cancel holiday
+  description: Disable the configured holiday without writing the dates or heating mode.
+  fields:
+    entry_id: *entry
+create_holiday:
+  name: Set holiday
+  description: Create a holiday using local wall-clock dates, with readback after each stage. Cancel an enabled holiday first.
+  fields:
+    entry_id: *entry
+    start:
+      name: Local start
+      description: "YYYY-MM-DDTHH:MM in Home Assistant's configured time zone. Must be in the future."
+      required: true
+      selector:
+        text:
+    end:
+      name: Local end
+      description: "YYYY-MM-DDTHH:MM, after the start. DST-crossing intervals are not supported."
+      required: true
+      selector:
+        text:
+    temperature: *holiday_target
+refresh:
+  name: Refresh heating state
+  description: Read current state from the receiver now, in addition to the regular 30-second refresh.
+  fields:
+    entry_id: *entry
+
+read_week:
+  name: Read the weekly schedule
+  description: Read each day individually and return the schedules, revisions and any failed reads.
+  fields:
+    entry_id: *entry
+set_schedule_group:
+  name: Apply a schedule to selected days
+  description: Check all selected day revisions before writing, then save and verify each day individually. Stops and reports any partially completed update.
+  fields:
+    entry_id: *entry
+    days:
+      name: Days
+      description: "List of day masks: Monday=2, Tuesday=4, Wednesday=8, Thursday=16, Friday=32, Saturday=64, Sunday=1."
+      required: true
+      selector:
+        object:
+    transitions:
+      name: Complete day
+      description: 'List of {time: "HH:MM", temperature: 18.5} objects. Use null for Off.'
+      required: true
+      selector:
+        object:
+    revisions:
+      name: Day revisions
+      description: Map each selected day mask (as a string) to the revision returned by read_week.
+      required: true
+      selector:
+        object:
+read_time:
+  name: Get receiver time
+  description: Read the receiver clock and calculate its signed difference from Home Assistant's clock.
+  fields:
+    entry_id: *entry
+set_time:
+  name: Set receiver time
+  description: Set the receiver clock to the supplied local time, or Home Assistant's current time when omitted, and read it back.
+  fields:
+    entry_id: *entry
+    time:
+      name: Date and time
+      description: "Optional YYYY-MM-DDTHH:MM:SS in Home Assistant's configured time zone."
+      selector:
+        text:
+
+set_boost_temperature:
+  name: Set boost temperature
+  description: Save the target for future boosts. Does not start heating or change an active boost.
+  fields:
+    entry_id: *entry
+    temperature:
+      <<: *target
+      required: true
+

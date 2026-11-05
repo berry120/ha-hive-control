@@ -1,0 +1,13 @@
+{
+  "domain": "hive_local",
+  "name": "Hive Local Control",
+  "version": "0.5.0",
+  "config_flow": true,
+  "dependencies": ["zha", "frontend"],
+  "documentation": "https://github.com/home-assistant/core/tree/dev/homeassistant/components/zha",
+  "codeowners": [],
+  "iot_class": "local_polling",
+  "integration_type": "device",
+  "requirements": []
+}
+

@@ -1,0 +1,54 @@
+name: Pull request checks
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements-dev.txt
+          npm ci
+          npx playwright-core install --with-deps chromium
+      - name: Lint and syntax
+        run: |
+          python -m ruff check custom_components tests scripts
+          python -m ruff format --check custom_components tests scripts
+          node --check custom_components/hive_local/frontend/hive-local-card.js
+          node --check preview/demo.js
+      - name: Python tests
+        run: python -m pytest -q
+      - name: Browser tests
+        run: npm test
+      - name: Build distribution
+        run: python scripts/build.py
+      - name: Check standalone preview
+        run: node scripts/check_preview.mjs
+      - name: Upload tested distribution
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hive-local-dist
+          path: |
+            dist/hive-local-control.zip
+            dist/preview.html
+          if-no-files-found: error
+          retention-days: 7

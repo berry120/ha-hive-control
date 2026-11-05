@@ -1,0 +1,9 @@
+{
+  "name": "hive-local-control",
+  "private": true,
+  "version": "0.5.0",
+  "type": "module",
+  "scripts": {"test": "node --test tests/card.test.mjs"},
+  "devDependencies": {"playwright-core": "^1.58.0"}
+}
+

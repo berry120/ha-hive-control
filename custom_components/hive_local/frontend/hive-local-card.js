@@ -1,0 +1,504 @@
+/* Hive Local Control — no external frontend libraries or helper cards required. */
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+})[c]);
+const degrees = (value) => typeof value === "number" && Number.isFinite(value)
+  ? new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value) : "—";
+const modeName = { schedule: "On schedule", boost: "Heat boost", manual: "Manual", off: "Off", unknown: "Mode unconfirmed" };
+const days = [[2, "Monday"], [4, "Tuesday"], [8, "Wednesday"], [16, "Thursday"], [32, "Friday"], [64, "Saturday"], [1, "Sunday"]];
+const controls = "button, input, select";
+const dayList = (selection) => days.filter(([day]) => selection.includes(day));
+const patternName = (selection) => {
+  const key = dayList(selection).map(([day]) => day).join(",");
+  if (key === "2,4,8,16,32,64,1") return "Every day";
+  if (key === "2,4,8,16,32") return "Weekdays";
+  if (key === "64,1") return "Weekend";
+  const names = dayList(selection).map(([, name]) => name);
+  return names.length === 1 ? names[0] : names.map((name) => name.slice(0, 3)).join(", ");
+};
+const groupWeek = (week) => {
+  const groups = new Map();
+  for (const [day] of days) {
+    const snapshot = week.days.find((item) => item.day === day);
+    if (!snapshot) continue;
+    const key = JSON.stringify(snapshot.transitions.map((row) => [row.time, row.temperature]));
+    if (!groups.has(key)) groups.set(key, { days: [], transitions: snapshot.transitions });
+    groups.get(key).days.push(day);
+  }
+  return [...groups.values()];
+};
+const periodSummary = (rows) => rows.flatMap((row, i) => row.temperature === null ? [] :
+  [`${row.time}–${rows[i + 1]?.time || "24:00"} · ${degrees(row.temperature)} °C`]).join("  /  ") || "Off at every scheduled change";
+const timeline = (rows) => {
+  const minute = (value) => { const [h, m] = value.split(":").map(Number); return h * 60 + m; };
+  let bars = `<span class="before-first" style="flex:${minute(rows[0].time)}" title="Before the first change"></span>`;
+  rows.forEach((row, i) => {
+    const length = (rows[i + 1] ? minute(rows[i + 1].time) : 1440) - minute(row.time);
+    bars += `<span class="${row.temperature === null ? "cool" : "warm"}" style="flex:${length}" title="${esc(row.time)} · ${row.temperature === null ? "Off" : degrees(row.temperature) + " °C"}"></span>`;
+  });
+  return `<div class="timeline" role="img" aria-label="${esc(rows.map((row) => `${row.time}: ${row.temperature === null ? "Off" : degrees(row.temperature) + " °C"}`).join(", "))}">${bars}</div>`;
+};
+const clockDifference = (seconds) => {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) return null;
+  const absolute = Math.abs(seconds), rounded = Math.round(absolute);
+  const amount = rounded < 60 ? `${rounded} sec` : rounded < 3600 ? `${Math.floor(rounded / 60)} min ${rounded % 60} sec`
+    : rounded < 86400 ? `${Math.floor(rounded / 3600)} hr ${Math.floor(rounded % 3600 / 60)} min` : `${Math.floor(rounded / 86400)} days ${Math.floor(rounded % 86400 / 3600)} hr`;
+  return { status: absolute <= 120 ? "good" : absolute <= 300 ? "warning" : "bad",
+    label: absolute < 1 ? "In sync · less than 1 sec" : `${amount} ${seconds > 0 ? "ahead" : "behind"}` };
+};
+
+const styles = `
+  :host { color:var(--primary-text-color,#20252b); font-family:var(--paper-font-body1_-_font-family,system-ui,sans-serif); --hive-accent:var(--primary-color,#d58b21); --hive-soft:color-mix(in srgb,var(--hive-accent) 12%,transparent); }
+  * { box-sizing:border-box; } button,input,select { font:inherit; } button,a,input,select { -webkit-tap-highlight-color:transparent; }
+  button { cursor:pointer; color:inherit; border:1px solid var(--divider-color,#ddd); border-radius:12px; padding:11px 15px; background:var(--card-background-color,#fff); min-height:44px; }
+  button:hover:not(:disabled) { background:var(--hive-soft); } button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible { outline:3px solid var(--hive-accent); outline-offset:3px; }
+  button:disabled { opacity:.48; cursor:default; } button.primary { background:var(--hive-accent); border-color:transparent; color:var(--text-primary-color,#fff); font-weight:650; }
+  button.primary:hover:not(:disabled) { filter:brightness(.95); background:var(--hive-accent); } button.quiet { border-color:transparent; background:transparent; }
+  ha-card { display:block; height:100%; overflow:hidden; background:var(--ha-card-background,var(--card-background-color,#fff)); border-radius:var(--ha-card-border-radius,16px); }
+  .compact { padding:18px 20px; display:grid; grid-template-columns:1fr auto; gap:12px; align-items:center; }
+  .open { text-align:left; background:none; border:0; padding:0; min-width:0; } .open:hover:not(:disabled) { background:none; }
+  .eyebrow { font-size:13px; color:var(--secondary-text-color,#66717e); display:flex; align-items:center; gap:7px; }
+  .temperature { font-size:46px; letter-spacing:-2px; line-height:1.2; font-weight:550; margin-top:8px; } .unit { font-size:20px; letter-spacing:0; font-weight:400; color:var(--secondary-text-color,#66717e); }
+  .subtle { color:var(--secondary-text-color,#66717e); font-size:13px; line-height:1.5; } .target { margin-top:5px; }
+  .reading { display:flex; align-items:baseline; gap:10px; } .reading-label { font-size:13px; flex-shrink:0; text-align:left; } .reading .temperature { margin-top:6px; }
+  .quick { display:flex; flex-direction:column; align-items:center; gap:6px; } .quick button { border-radius:30px; padding:12px 19px; }
+  .dot { width:7px; height:7px; border-radius:50%; background:var(--disabled-text-color,#a0a5ad); display:inline-block; } .dot.heating { background:#e49b35; }
+  .card-message { margin:0; padding:0 20px 12px; font-size:13px; } .error { color:var(--error-color,#bc3838); }
+  .unreachable { margin:10px 0 0; font-size:13px; line-height:1.4; color:var(--secondary-text-color,#66717e); } .connection-status { margin:12px 0 0; font-size:13px; line-height:1.5; color:var(--secondary-text-color,#66717e); }
+  dialog { color:inherit; background:var(--card-background-color,#fff); border:1px solid var(--divider-color,#ddd); border-radius:22px; padding:0; width:min(600px,calc(100vw - 24px)); max-height:calc(100dvh - 32px); box-shadow:0 24px 80px #0005; }
+  dialog::backdrop { background:#0007; } .dialog-body { padding:24px; } .heading { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  h2 { font-size:23px; letter-spacing:-.5px; margin:0 0 4px; font-weight:600; } h3 { font-size:16px; margin:0 0 14px; font-weight:600; }
+  .header-actions { display:flex; gap:4px; align-items:center; } .close,.refresh { font-size:24px; width:44px; padding:0; border:0; display:grid; place-items:center; } .refresh svg { width:21px; height:21px; }
+  @keyframes hive-spin { to { transform:rotate(360deg); } } @media(prefers-reduced-motion:no-preference) { .refresh[aria-busy=true] svg { animation:hive-spin 1s linear infinite; } }
+  nav { display:flex; overflow:auto; border-bottom:1px solid var(--divider-color,#ddd); margin:20px 0; gap:4px; }
+  nav button { border:0; border-radius:10px 10px 0 0; background:none; padding:11px 13px; white-space:nowrap; font-size:14px; }
+  nav button[aria-selected=true] { color:var(--hive-accent); background:var(--hive-soft); box-shadow:inset 0 -2px var(--hive-accent); }
+  .live { border-radius:16px; padding:18px; background:var(--hive-soft); display:flex; justify-content:space-between; align-items:center; gap:14px; margin-bottom:22px; }
+  .live strong { font-size:32px; font-weight:500; } [data-live-status] { text-align:right; }
+  section + section { border-top:1px solid var(--divider-color,#ddd); padding-top:20px; margin-top:22px; } .holiday-plan { margin-top:26px; }
+  .row { display:flex; gap:12px; align-items:end; flex-wrap:wrap; } .row > label { flex:1; min-width:120px; } .row button { flex-shrink:0; }
+  .modes { display:flex; gap:8px; margin-bottom:16px; } .modes button { flex:1; } [data-mode][aria-pressed=true] { border-color:var(--hive-accent); background:var(--hive-soft); color:var(--hive-accent); }
+  label { display:flex; flex-direction:column; gap:7px; font-size:13px; color:var(--secondary-text-color,#66717e); }
+  input,select { width:100%; min-height:44px; border:1px solid var(--divider-color,#ccd0d5); border-radius:10px; padding:10px; color:var(--primary-text-color,#20252b); background:var(--card-background-color,#fff); }
+  input:disabled { opacity:.5; } .hint { color:var(--secondary-text-color,#66717e); font-size:13px; line-height:1.55; margin:12px 0 0; }
+  .schedule-row { display:grid; grid-template-columns:22px 1fr 76px 1fr 32px; align-items:center; gap:10px; margin:12px 0; }
+  .schedule-row label.off { flex-direction:row; align-items:center; color:inherit; } input[type=checkbox] { width:20px; height:20px; min-height:0; accent-color:var(--hive-accent); }
+  .schedule-header { display:grid; grid-template-columns:22px 1fr 76px 1fr 32px; gap:10px; font-size:12px; color:var(--secondary-text-color,#66717e); margin-top:22px; }
+  .remove-period { padding:0; font-size:20px; } .period-tools { display:flex; align-items:center; gap:12px; margin-top:16px; } .pattern-source { margin:18px 0; }
+  .actions { margin-top:18px; display:flex; justify-content:flex-end; gap:10px; flex-wrap:wrap; } .message { font-size:13px; line-height:1.5; margin:18px 0 0; padding:12px; border-radius:10px; background:var(--secondary-background-color,#f4f5f7); }
+  .message:empty { display:none; } .setting { padding:12px 0; } .setting strong { font-size:14px; font-weight:600; display:block; margin-bottom:5px; }
+  .pattern { display:block; width:100%; text-align:left; padding:16px; margin:12px 0; }
+  .pattern-heading { display:flex; justify-content:space-between; gap:12px; align-items:center; }
+  .pattern-heading strong { font-size:16px; font-weight:600; } .pattern-heading span { color:var(--hive-accent); font-size:13px; }
+  .day-summary { font-size:12px; color:var(--secondary-text-color,#66717e); margin-top:5px; }
+  .timeline { display:flex; overflow:hidden; height:12px; border-radius:5px; margin:16px 0 9px; }
+  .timeline .warm { background:var(--hive-accent); } .timeline .cool { background:var(--divider-color,#ddd); }
+  .timeline .before-first { background:repeating-linear-gradient(135deg,transparent,transparent 3px,var(--divider-color,#ddd) 3px,var(--divider-color,#ddd) 5px); }
+  .pattern-periods { font-size:12px; line-height:1.6; color:var(--secondary-text-color,#66717e); }
+  .schedule-toolbar { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:14px; }
+  .schedule-toolbar h3 { margin:0; } .schedule-toolbar button { font-size:13px; }
+  .day-buttons { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:5px; margin:10px 0; }
+  .day-buttons button { padding:9px 0; min-width:0; font-size:12px; }
+  .day-buttons button[aria-pressed=true] { border-color:var(--hive-accent); background:var(--hive-soft); color:var(--hive-accent); }
+  .presets { display:flex; flex-wrap:wrap; gap:6px; } .presets button { font-size:12px; min-height:36px; padding:5px 10px; }
+  .clock { font-size:23px; font-weight:500; margin:10px 0; line-height:1.4; }
+  .clock.good { color:var(--success-color,#258045); } .clock.warning { color:var(--warning-color,#997000); } .clock.bad { color:var(--error-color,#bc3838); }
+  .inline-setting { display:grid; grid-template-columns:minmax(0,240px) auto; align-items:end; gap:10px; width:fit-content; max-width:100%; }
+  .inline-setting > label { min-width:0; } .inline-setting input { min-width:0; } .inline-setting button { width:auto; }
+  .boost-setting { grid-template-columns:minmax(0,160px) auto; }
+  a { color:var(--hive-accent); } details { margin-top:18px; } summary { cursor:pointer; font-size:13px; } pre { white-space:pre-wrap; word-break:break-word; font-size:12px; line-height:1.5; } .empty { padding:22px; }
+  @media(max-width:420px) { .dialog-body { padding:18px; } .compact { padding:16px; gap:10px; } .temperature { font-size:38px; } .reading { gap:8px; } .schedule-row,.schedule-header { grid-template-columns:14px minmax(72px,1fr) 45px minmax(64px,1fr) 32px; gap:6px; } .schedule-row input:not([type=checkbox]) { padding:8px 5px; } nav button { padding:10px; } .row button { width:100%; } }
+`;
+
+class HiveLocalCard extends HTMLElement {
+  constructor() { super(); this.attachShadow({ mode: "open" }); }
+  static getConfigElement() { return document.createElement("hive-local-card-editor"); }
+  static getStubConfig(hass) {
+    return { entity: Object.values(hass.states).find((s) => s.attributes.hive_local_control)?.entity_id };
+  }
+  setConfig(config) {
+    if (config.entity && !config.entity.startsWith("sensor.")) throw new Error("Select the Hive Local Control sensor.");
+    for (const [key, min, max, step] of [["boost_minutes", 1, 360, 1]]) {
+      if (config[key] != null && (typeof config[key] !== "number" || !Number.isFinite(config[key]) || config[key] < min || config[key] > max || config[key] % step !== 0)) {
+        throw new Error(`Invalid ${key}. Use ${min}–${max} in steps of ${step}.`);
+      }
+    }
+    if (config.entity !== this._config?.entity) this._autoEntity = undefined;
+    this._config = { ...config }; this._render();
+  }
+  set hass(hass) { this._hass = hass; this._render(); this._dialog?.updateLive(); }
+  get hass() { return this._hass; }
+  get state() {
+    if (!this._hass) return undefined;
+    if (this._config?.entity) return this._hass.states?.[this._config.entity];
+    const entries = Object.values(this._hass.states || {}).filter((s) => s.attributes.hive_local_control);
+    if (entries.length > 1) { this._autoEntity = undefined; return undefined; }
+    if (entries.length === 1) { this._autoEntity = entries[0].entity_id; return entries[0]; }
+    return this._hass.states?.[this._autoEntity];
+  }
+  get options() {
+    const a = this.state?.attributes || {};
+    return { name: this._config?.name || a.name || "Heating", minutes: this._config?.boost_minutes ?? a.boost_minutes ?? 10,
+      temperature: a.boost_temperature ?? 30 };
+  }
+  get online() {
+    const s = this.state, a = s?.attributes;
+    return !!(a?.hive_local_control && a.reachable !== false && a.restored !== true && a.read_at
+      && s.state !== "unavailable" && (s.state !== "unknown" || a.reachable === true) && this._hass?.connected !== false);
+  }
+  getCardSize() { return 2; }
+  getGridOptions() { return { columns: 6, rows: 3, min_columns: 6, min_rows: 3 }; }
+  disconnectedCallback() { this._dialog?.remove(); this._dialog = undefined; }
+  _render() {
+    if (!this._config || !this._hass) return;
+    const s = this.state, a = s?.attributes || {}, o = this.options, online = this.online;
+    if (!a.hive_local_control && ((!this._config.entity && !this._autoEntity) || (s && !["unavailable", "unknown"].includes(s.state) && !a.restored))) {
+      this.shadowRoot.innerHTML = `<style>${styles}</style><ha-card><div class="empty">Select a Hive Local Control sensor in the card editor. Add the integration in Settings → Devices &amp; services first.</div></ha-card>`;
+      return;
+    }
+    const boost = online && s?.state === "boost";
+    const target = a.scheduled_off ? "Scheduled Off" : `${degrees(a.target_temperature)} °C`;
+    this.shadowRoot.innerHTML = `<style>${styles}</style><ha-card>
+      <div class="compact"><button class="open" aria-label="Open ${esc(o.name)} controls">
+        <div class="eyebrow"><span class="dot ${this.online && a.heating ? "heating" : ""}"></span>${esc(o.name)} <span aria-hidden="true">›</span></div>
+        <div class="reading"><span class="temperature">${this.online ? degrees(a.current_temperature) : "—"}<span class="unit"> °C</span></span><span class="subtle reading-label">Current</span></div>
+        <div class="reading subtle target"><span>${this.online ? esc(target) : "—"}</span><span class="reading-label">Target</span></div>
+        ${online ? "" : '<div class="unreachable" role="status">Thermostat unreachable</div>'}
+      </button><div class="quick"><button class="primary boost" ${!this.online || this._busy ? "disabled" : ""}>${this._busy ? "Working…" : boost ? "End boost" : "Heat boost"}</button>
+        <span class="subtle">${online ? boost ? `${esc(a.remaining_minutes)} min left` : `${esc(o.minutes)} min` : ""}</span>
+      </div></div>
+      ${this._message ? `<p class="card-message ${this._error ? "error" : ""}" role="status">${esc(this._message)}</p>` : ""}
+    </ha-card>`;
+    this.shadowRoot.querySelector(".open").onclick = () => this._open();
+    this.shadowRoot.querySelector(".boost").onclick = async () => {
+      try { await this.call(boost ? "resume_schedule" : "boost", boost ? {} : { minutes: o.minutes }); }
+      catch { /* Error is displayed by call(). */ }
+    };
+  }
+  _open() {
+    if (this._dialog) return;
+    this._dialog = document.createElement("hive-local-dialog");
+    this._dialog.owner = this;
+    this._dialog.onClose = () => { this._dialog = undefined; this.shadowRoot.querySelector(".open")?.focus(); };
+    document.body.append(this._dialog);
+  }
+  async call(service, data = {}) {
+    if (this._busy) throw new Error("A receiver operation is already running.");
+    const state = this.state;
+    if (!state?.attributes.hive_local_control || !state.attributes.entry_id) throw new Error("Thermostat unreachable. Waiting for its Home Assistant sensor.");
+    this._busy = true; this._message = ""; this._error = false; this._render();
+    try {
+      const reply = await this._hass.callWS({ type: "call_service", domain: "hive_local", service,
+        service_data: { entry_id: state.attributes.entry_id, ...data }, return_response: true });
+      if (!reply?.response) throw new Error("Home Assistant did not return a receiver response.");
+      this._error = reply.response.complete === false || reply.response.read_back === false;
+      this._message = this._error ? reply.response.message || "Could not confirm the change. Reopen the controls to check." : "";
+      return reply.response;
+    } catch (error) {
+      this._error = true; this._message = error.message || String(error); throw error;
+    } finally { this._busy = false; this._render(); this._dialog?.updateLive(); }
+  }
+}
+
+class HiveLocalDialog extends HTMLElement {
+  constructor() { super(); this.attachShadow({ mode: "open" }); this._tab = "control"; }
+  connectedCallback() {
+    this.shadowRoot.innerHTML = `<style>${styles}</style><dialog aria-labelledby="title"><div class="dialog-body">
+      <div class="heading"><h2 id="title">${esc(this.owner.options.name)}</h2><div class="header-actions"><button class="refresh quiet" aria-label="Refresh" title="Refresh current tab" aria-busy="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 10a8 8 0 1 0-2 8M20 4v6h-6"/></svg></button><button class="close quiet" aria-label="Close controls">×</button></div></div>
+      <p class="connection-status" role="status" hidden>Thermostat unreachable. Refresh to check the connection.</p>
+      <nav role="tablist" aria-label="Heating settings">${[["control", "Heating"], ["schedule", "Schedule"], ["holiday", "Holiday"], ["settings", "Settings"]].map(([id, name]) => `<button role="tab" id="tab-${id}" aria-controls="panel" data-tab="${id}">${name}</button>`).join("")}</nav>
+      <div id="panel" role="tabpanel"></div><p class="message" role="status" aria-live="polite"></p>
+    </div></dialog>`;
+    const dialog = this.shadowRoot.querySelector("dialog");
+    dialog.addEventListener("close", () => { this.remove(); this.onClose?.(); });
+    this.shadowRoot.querySelector(".close").onclick = () => dialog.close();
+    this.shadowRoot.querySelector(".refresh").onclick = () => this.refreshCurrentTab();
+    this.shadowRoot.querySelectorAll("[data-tab]").forEach((button) => {
+      button.onclick = () => {
+        if (this._busy) return;
+        this._tab = button.dataset.tab;
+        if (this._tab === "settings") { this._clock = undefined; this._clockError = false; }
+        if (this._tab === "holiday") this._holiday = undefined;
+        this.renderPanel();
+      };
+      button.onkeydown = (e) => {
+        if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(e.key)) return;
+        e.preventDefault();
+        const buttons = [...this.shadowRoot.querySelectorAll("[data-tab]")];
+        const i = buttons.indexOf(button);
+        const next = e.key === "Home" ? 0 : e.key === "End" ? 3 : (i + (e.key === "ArrowRight" ? 1 : 3)) % 4;
+        buttons[next].click(); buttons[next].focus();
+      };
+    });
+    this.renderPanel(); this.updateLive(); dialog.showModal();
+  }
+  updateLive() {
+    const a = this.owner.state?.attributes || {};
+    const current = this.shadowRoot.querySelector("[data-live-temperature]");
+    if (current) current.textContent = `${this.owner.online ? degrees(a.current_temperature) : "—"} °C`;
+    const status = this.shadowRoot.querySelector("[data-live-status]");
+    if (status) status.textContent = this.owner.online ? `${modeName[this.owner.state.state] || "Mode unconfirmed"} · ${a.heating === true ? "Heating" : a.heating === false ? "Idle" : "Relay state unknown"}` : "Thermostat unreachable";
+    this.shadowRoot.querySelector(".connection-status").hidden = this.owner.online;
+    this.shadowRoot.querySelectorAll("[data-requires-online]").forEach((button) => { button.disabled = this._busy || !this.owner.online; });
+    this.shadowRoot.querySelectorAll("[data-mode]").forEach((button) => button.setAttribute("aria-pressed", String(this.owner.online && button.dataset.mode === this.owner.state.state)));
+  }
+  setMessage(message, error = false) {
+    const node = this.shadowRoot.querySelector(".message");
+    node.textContent = message; node.classList.toggle("error", error);
+  }
+  refreshCurrentTab() {
+    if (this._busy) return;
+    if (this._tab === "schedule") {
+      if (this._editing && this._dirty) {
+        this.setMessage("Save or discard your changes before refreshing the schedule.", true); return;
+      }
+      return this.loadWeek();
+    }
+    if (this._tab === "holiday") {
+      const form = this.shadowRoot.querySelector("#create-holiday,#holiday-temperature");
+      const draft = form ? [...new FormData(form)] : [];
+      return this.loadHoliday(() => {
+        const refreshed = form && this.shadowRoot.querySelector(`#${form.id}`);
+        if (refreshed) for (const [name, value] of draft) refreshed.elements.namedItem(name).value = value;
+      });
+    }
+    if (this._tab === "settings") {
+      this._clock = undefined; this._clockError = false; this._boostTemperature = undefined;
+      this.renderSettings(this.shadowRoot.querySelector("#panel"), this.owner.state?.attributes || {});
+      return;
+    }
+    return this.run("refresh", {}, () => this.updateLive());
+  }
+  async run(service, data, done) {
+    if (this._busy) return;
+    this._busy = true; this.setMessage(service === "set_boost_temperature" ? "Saving…" : "Talking to the receiver…");
+    this.shadowRoot.querySelector(".refresh").setAttribute("aria-busy", String(service === "refresh" || service.startsWith("read_")));
+    this.shadowRoot.querySelectorAll(controls).forEach((node) => { node.dataset.wasDisabled = String(node.disabled); node.disabled = true; });
+    // Closing remains possible while a request is in flight.
+    this.shadowRoot.querySelector(".close").disabled = false;
+    try {
+      const result = await this.owner.call(service, data);
+      if (!this.isConnected) return;
+      done?.(result);
+      const error = result.complete === false || result.read_back === false;
+      this.setMessage(!error && (service.startsWith("read_") || result.message === "Receiver values confirmed.") ? "" : result.message || "", error);
+      return result;
+    } catch (error) {
+      if (this.isConnected) {
+        if (service === "set_time") {
+          this._clock = undefined; this._clockError = true;
+          this.renderSettings(this.shadowRoot.querySelector("#panel"), this.owner.state?.attributes || {});
+        }
+        this.setMessage(error.message || String(error), true);
+      }
+    }
+    finally {
+      this._busy = false;
+      this.shadowRoot.querySelector(".refresh").setAttribute("aria-busy", "false");
+      this.shadowRoot.querySelectorAll("[data-was-disabled]").forEach((node) => { node.disabled = node.dataset.wasDisabled === "true"; delete node.dataset.wasDisabled; });
+      this.updateLive();
+    }
+  }
+  bindForm(id, service, data, done, enabled = () => true) {
+    const form = this.shadowRoot.querySelector(`#${id}`);
+    if (form) form.onsubmit = (e) => {
+      e.preventDefault();
+      if (form.querySelector("[data-requires-online]") && !this.owner.online) return;
+      if (enabled() && form.reportValidity()) this.run(service, data(new FormData(form)), done);
+    };
+  }
+  renderPanel() {
+    const a = this.owner.state?.attributes || {}, o = this.owner.options;
+    const panel = this.shadowRoot.querySelector("#panel");
+    this.shadowRoot.querySelectorAll("[data-tab]").forEach((button) => { const selected = button.dataset.tab === this._tab; button.setAttribute("aria-selected", String(selected)); button.tabIndex = selected ? 0 : -1; });
+    panel.setAttribute("aria-labelledby", `tab-${this._tab}`);
+    this.setMessage("");
+    if (this._tab === "control") {
+      panel.innerHTML = `<div class="live"><div><div class="subtle">Current temperature</div><strong data-live-temperature></strong></div><div class="subtle" data-live-status></div></div>
+        <section><h3>Heat boost</h3><form id="boost" class="row">
+          <label>Minutes<input name="minutes" type="number" min="1" max="360" step="1" required value="${esc(o.minutes)}"></label>
+          <button class="primary" data-requires-online>Start boost</button>
+        </form><p class="hint">Boost temperature can be found in settings.</p></section>
+        <section><h3>Heating mode</h3><div class="modes"><button id="off" data-mode="off" data-requires-online>Turn off</button><button id="resume" data-mode="schedule" data-requires-online>Use schedule</button></div>
+        <form id="manual-mode" class="row"><label>Manual temperature · °C<input name="temperature" type="number" min="5" max="32" step="0.5" required value="${esc(this._manualTarget ?? (this.owner.online && this.owner.state?.state === "manual" && a.target_temperature >= 5 ? a.target_temperature : 20))}"></label><button data-mode="manual" data-requires-online>Use manual</button></form>
+        <p class="hint">Manual holds this temperature until you choose another mode.</p></section>`;
+      this.shadowRoot.querySelector("#resume").onclick = () => this.run("resume_schedule");
+      this.shadowRoot.querySelector("#off").onclick = () => this.run("off");
+      this.bindForm("boost", "boost", (f) => ({ minutes: Number(f.get("minutes")) }));
+      this.bindForm("manual-mode", "manual", (f) => ({ temperature: Number(f.get("temperature")) }));
+      this.shadowRoot.querySelector("#manual-mode input").oninput = (e) => { this._manualTarget = e.target.value; };
+      this.updateLive();
+    } else if (this._tab === "schedule") {
+      this.renderSchedule(panel);
+    } else if (this._tab === "holiday") {
+      const h = this._holiday;
+      panel.innerHTML = `<h3>While you're away</h3><p class="hint holiday-status">${h ? h.enabled ? "A holiday is enabled. It may be scheduled for a future date." : "No holiday is enabled." : "Loading holiday settings…"} Dates use ${esc(a.timezone || "Home Assistant's time zone")}.</p>
+        ${h?.enabled ? `<div class="setting"><strong>Holiday dates</strong><div class="subtle">${esc(h.start?.replace("T", " · ") || "Not set")} → ${esc(h.end?.replace("T", " · ") || "Not set")}</div></div>
+          <form id="holiday-temperature" class="row"><label>Away temperature · °C<input name="temperature" type="number" min="5" max="32" step="1" required value="${esc(h.temperature)}"></label><button>Save temperature</button></form><p class="hint">Cancel this holiday before planning another.</p><div class="actions"><button id="cancel-holiday">Cancel holiday</button></div>` : h ?
+          `<section class="holiday-plan"><h3>Plan a holiday</h3><form id="create-holiday"><div class="row"><label>Start<input name="start" type="datetime-local" required></label><label>End<input name="end" type="datetime-local" required></label></div><label style="margin-top:12px">Away temperature · °C<input name="temperature" type="number" min="5" max="32" step="1" required value="${esc(h.temperature >= 5 ? h.temperature : 7)}"></label><div class="actions"><button class="primary">Set holiday</button></div></form></section>` : ""}`;
+      const reloadAfterWrite = () => {
+        this._holiday = undefined; this.renderPanel();
+        queueMicrotask(() => { if (this.isConnected) this.loadHoliday(); });
+      };
+      this.bindForm("holiday-temperature", "set_holiday_temperature", (f) => ({ temperature: Number(f.get("temperature")) }), reloadAfterWrite);
+      const cancel = this.shadowRoot.querySelector("#cancel-holiday");
+      if (cancel) cancel.onclick = () => this.run("cancel_holiday", {}, reloadAfterWrite);
+      this.bindForm("create-holiday", "create_holiday", (f) => ({ start: f.get("start"), end: f.get("end"), temperature: Number(f.get("temperature")) }), (r) => { this._holiday = r.holiday; this.renderPanel(); });
+      if (!h && !this._busy) this.loadHoliday();
+    } else {
+      this.renderSettings(panel, a);
+    }
+  }
+  renderSchedule(panel) {
+    if (!this._editing) {
+      const groups = this._week ? groupWeek(this._week) : [];
+      panel.innerHTML = `<div class="schedule-toolbar"><h3>Your weekly rhythm</h3><button id="new-pattern" ${!this._week?.days.length || this._needsReload ? "disabled" : ""}>New pattern</button></div>
+        <p class="hint">Days with the same schedule share a pattern. Edit it once, then choose the days it applies to.</p>
+        ${groups.map((group, i) => `<button class="pattern" data-pattern="${i}" aria-label="Edit ${esc(patternName(group.days))}" ${this._needsReload ? "disabled" : ""}>
+          <div class="pattern-heading"><strong>${esc(patternName(group.days))}</strong><span>Edit ›</span></div>
+          <div class="day-summary">${dayList(group.days).map(([, name]) => name.slice(0, 3)).join(" · ")}</div>
+          ${timeline(group.transitions)}<div class="pattern-periods">${esc(periodSummary(group.transitions))}</div></button>`).join("")}
+        ${!this._week ? '<p class="hint">Use the refresh icon above to try reading the week again.</p>' : ""}
+        ${Object.keys(this._week?.errors || {}).length ? `<p class="hint error">Could not read ${esc(patternName(Object.keys(this._week.errors).map(Number)))}. Use the refresh icon above to try again.</p>` : ""}
+        ${this._needsReload ? '<p class="hint error">Refresh the week using the icon above before editing again.</p>' : ""}`;
+      panel.querySelector("#new-pattern").onclick = () => {
+        this._editing = true; this._newPattern = true; this._sourcePattern = "blank";
+        this._selection = new Set(); this._rows = [{ time: "00:00", temperature: null }];
+        this._dirty = false; this.renderPanel();
+      };
+      panel.querySelectorAll("[data-pattern]").forEach((button) => button.onclick = () => {
+        const group = groups[Number(button.dataset.pattern)];
+        this._editing = true; this._newPattern = false; this._selection = new Set(group.days);
+        this._rows = structuredClone(group.transitions); this._dirty = false; this.renderPanel();
+      });
+      if (!this._week && !this._busy) this.loadWeek();
+      return;
+    }
+    const selected = [...this._selection];
+    const saveLabel = !selected.length ? "Save pattern" : selected.length === 1 ? `Save ${patternName(selected)}` : `Save ${selected.length} days`;
+    const groups = groupWeek(this._week);
+    panel.innerHTML = `<div class="schedule-toolbar"><h3>${this._newPattern ? "New pattern" : "Edit pattern"}</h3><button id="back-week">Back to week</button></div>
+      ${this._newPattern ? '<p class="hint" style="margin:0 0 18px">Choose one day for its own schedule, or several to share it. Saving moves these days out of their current groups.</p>' : ""}
+      <div class="subtle">Apply this schedule to</div><div class="day-buttons" role="group" aria-label="Days to update">${days.map(([day, name]) => `<button type="button" data-day="${day}" aria-label="${name}" aria-pressed="${this._selection.has(day)}" ${this._week.days.some((d) => d.day === day) ? "" : "disabled"}>${name.slice(0, 3)}</button>`).join("")}</div>
+      <div class="presets"><button data-preset="weekdays">Weekdays</button><button data-preset="weekend">Weekend</button><button data-preset="all">Every day</button></div>
+      ${this._week.days.length < 7 ? '<p class="hint">Days that could not be read are disabled. Return to the week and use the refresh icon to include them.</p>' : ""}
+      ${this._newPattern ? `<label class="pattern-source"><span id="pattern-source-label">Start with</span><select id="pattern-source" aria-labelledby="pattern-source-label"><option value="blank" ${this._sourcePattern === "blank" ? "selected" : ""}>Blank schedule (all day off)</option>${groups.map((group, i) => `<option value="${i}" ${this._sourcePattern === String(i) ? "selected" : ""}>Copy ${esc(patternName(group.days))}</option>`).join("")}</select></label>` : ""}
+      <form id="schedule"><div class="schedule-header"><span></span><span>Start time</span><span>Off</span><span>Target · °C</span><span></span></div>${this._rows.map((row, i) => `<div class="schedule-row"><span class="subtle">${i + 1}</span><input type="time" required value="${esc(row.time)}" data-index="${i}" data-field="time" aria-label="Period ${i + 1} start time"><label class="off"><input type="checkbox" data-index="${i}" data-field="off" ${row.temperature === null ? "checked" : ""} aria-label="Period ${i + 1} off">Off</label><input type="number" min="5" max="32" step="0.5" required value="${Number.isFinite(row.temperature) ? esc(row.temperature) : ""}" ${row.temperature === null ? "disabled" : ""} data-index="${i}" data-field="temperature" aria-label="Period ${i + 1} target temperature"><button class="quiet remove-period" type="button" data-remove="${i}" aria-label="Remove period ${i + 1}" title="Remove period" ${this._rows.length === 1 ? "disabled" : ""}>×</button></div>`).join("")}
+        <div class="period-tools"><button type="button" id="add-period" ${this._rows.length >= 6 ? "disabled" : ""}>Add period</button><span class="subtle">${this._rows.length} of 6 periods</span></div>
+        <p class="hint">Set times in order. Saving replaces the schedule on the selected days. Matching schedules appear together.</p>
+        ${this._needsReload ? '<p class="hint error">Some days could not be confirmed. Discard changes, then refresh the week using the icon above.</p>' : ""}
+        <div class="actions"><button type="button" id="discard-schedule">Discard changes</button><button id="save-pattern" class="primary" ${!selected.length || this._needsReload ? "disabled" : ""}>${esc(saveLabel)}</button></div>
+      </form>`;
+    panel.querySelector("#back-week").onclick = () => {
+      if (this._dirty) { this.setMessage("Save your edits or choose Discard changes before returning to the week.", true); return; }
+      this._editing = false; this.renderPanel();
+    };
+    panel.querySelector("#discard-schedule").onclick = () => {
+      this._editing = false; this._dirty = false; this.renderPanel();
+    };
+    const source = panel.querySelector("#pattern-source");
+    if (source) source.onchange = () => {
+      this._sourcePattern = source.value;
+      this._rows = source.value === "blank" ? [{ time: "00:00", temperature: null }] : structuredClone(groups[Number(source.value)].transitions);
+      this._dirty = true; this.renderPanel();
+    };
+    panel.querySelector("#add-period").onclick = () => {
+      if (this._rows.length >= 6) return;
+      this._rows.push({ time: "", temperature: 20 }); this._dirty = true; this.renderPanel();
+      panel.querySelector(`[data-field="time"][data-index="${this._rows.length - 1}"]`).focus();
+    };
+    panel.querySelectorAll("[data-remove]").forEach((button) => button.onclick = () => {
+      if (this._rows.length <= 1) return;
+      this._rows.splice(Number(button.dataset.remove), 1); this._dirty = true; this.renderPanel();
+    });
+    panel.querySelectorAll("[data-day]").forEach((button) => button.onclick = () => {
+      const day = Number(button.dataset.day);
+      if (this._selection.has(day)) this._selection.delete(day); else this._selection.add(day);
+      this._dirty = true; this.renderPanel();
+    });
+    panel.querySelectorAll("[data-preset]").forEach((button) => button.onclick = () => {
+      const preset = button.dataset.preset;
+      this._selection = new Set(days.filter((_, index) => preset === "all" || (preset === "weekdays" ? index < 5 : index >= 5))
+        .map(([day]) => day).filter((day) => this._week.days.some((item) => item.day === day)));
+      this._dirty = true; this.renderPanel();
+    });
+    panel.querySelectorAll("[data-field]").forEach((input) => input.addEventListener("input", () => {
+      const row = this._rows[Number(input.dataset.index)], field = input.dataset.field;
+      if (field === "time") row.time = input.value;
+      if (field === "temperature") row.temperature = input.value === "" ? NaN : Number(input.value);
+      if (field === "off") {
+        row.temperature = input.checked ? null : 20;
+        const target = input.closest(".schedule-row").querySelector('[data-field="temperature"]');
+        target.disabled = input.checked; target.value = input.checked ? "" : row.temperature;
+      }
+      this._dirty = true;
+    }));
+    this.bindForm("schedule", "set_schedule_group", () => ({
+      days: dayList([...this._selection]).map(([day]) => day), transitions: this._rows,
+      revisions: Object.fromEntries(this._week.days.filter((item) => this._selection.has(item.day)).map((item) => [item.day, item.revision])),
+    }), (result) => {
+      for (const snapshot of result.days) {
+        const index = this._week.days.findIndex((item) => item.day === snapshot.day);
+        this._week.days[index] = snapshot;
+      }
+      if (result.complete) { this._dirty = false; this._editing = false; }
+      else { this._dirty = true; this._needsReload = true; }
+      this.renderPanel();
+    }, () => !this._needsReload && this._selection.size > 0);
+  }
+  renderSettings(panel, attributes) {
+    const zone = this._clock?.timezone || attributes.timezone || "Home Assistant time zone";
+    const difference = clockDifference(this._clock?.clock_delta_seconds);
+    panel.innerHTML = `<section><h3>Heat boost</h3><form id="boost-temperature" class="inline-setting boost-setting"><label>Boost temperature · °C<input name="temperature" type="number" min="5" max="32" step="0.5" required value="${esc(this._boostDraft ?? this._boostTemperature ?? this.owner.options.temperature)}"></label><button>Save</button></form><p class="hint">Applies to future boosts from this control.</p></section>
+      <section><h3>Clock difference</h3><div class="subtle">Thermostat compared with Home Assistant</div>
+      <div class="clock ${difference?.status || "subtle"}" role="status">${esc(difference?.label || (this._clockError || this._clock ? "Clock difference unavailable" : "Checking clock…"))}</div>
+      <button id="sync-time">Sync with Home Assistant</button></section>
+      <section><h3>Set a manual date and time</h3><form id="set-time" class="inline-setting"><label>Date and time · ${esc(zone)}<input name="time" type="datetime-local" step="1" required value="${esc(this._manualTime)}"></label><button>Set</button></form></section>`;
+    const update = (result) => { this._clock = result; this._clockError = false; this.renderPanel(); };
+    panel.querySelector("#sync-time").onclick = () => this.run("set_time", {}, update);
+    this.bindForm("set-time", "set_time", (form) => ({ time: form.get("time") }), update);
+    panel.querySelector('#set-time input').oninput = (e) => { this._manualTime = e.target.value; };
+    panel.querySelector('#boost-temperature input').oninput = (e) => { this._boostDraft = e.target.value; };
+    this.bindForm("boost-temperature", "set_boost_temperature", (form) => ({ temperature: Number(form.get("temperature")) }), (result) => { this._boostTemperature = result.temperature; this._boostDraft = undefined; this.renderPanel(); });
+    if (!this._clock && !this._clockError && !this._busy) this.loadTime();
+  }
+  loadWeek() { this.run("read_week", {}, (result) => { this._week = result; this._editing = false; this._dirty = false; this._needsReload = false; this.renderPanel(); }); }
+  async loadTime() {
+    const result = await this.run("read_time", {}, (value) => { this._clock = value; this.renderPanel(); });
+    if (!result && this.isConnected) {
+      this._clockError = true;
+      this.renderSettings(this.shadowRoot.querySelector("#panel"), this.owner.state?.attributes || {});
+    }
+  }
+  loadHoliday(done) { return this.run("read_holiday", {}, (r) => { this._holiday = r; this.renderPanel(); done?.(); }); }
+}
+
+class HiveLocalEditor extends HTMLElement {
+  constructor() { super(); this.attachShadow({ mode: "open" }); }
+  setConfig(config) { this._config = { ...config }; this.render(); }
+  set hass(hass) { this._hass = hass; if (!this.shadowRoot.activeElement) this.render(); }
+  render() {
+    if (!this._hass || !this._config) return;
+    const entities = Object.values(this._hass.states).filter((s) => s.attributes.hive_local_control);
+    this.shadowRoot.innerHTML = `<style>${styles} label { margin:12px 0; }</style><label>Hive heating sensor<select name="entity"><option value="">Auto-select (one installation)</option>${entities.map((s) => `<option value="${esc(s.entity_id)}" ${s.entity_id === this._config.entity ? "selected" : ""}>${esc(s.attributes.friendly_name || s.entity_id)}</option>`).join("")}</select></label>
+      <label>Card name (optional)<input name="name" value="${esc(this._config.name)}" placeholder="Heating"></label>
+      <label>Boost minutes (optional)<input name="boost_minutes" type="number" min="1" max="360" step="1" value="${esc(this._config.boost_minutes)}" placeholder="Integration default"></label><p class="hint">Change the boost temperature in the control's Settings tab. Device addresses and default boost duration are configured in Settings → Devices &amp; services → Hive Local Control.</p>`;
+    this.shadowRoot.querySelectorAll("input,select").forEach((input) => input.onchange = () => {
+      if (!input.reportValidity()) return;
+      const config = { ...this._config };
+      if (!input.value) delete config[input.name];
+      else config[input.name] = input.type === "number" ? Number(input.value) : input.value;
+      this._config = config;
+      this.dispatchEvent(new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true }));
+    });
+  }
+}
+
+for (const [name, component] of [["hive-local-card", HiveLocalCard], ["hive-local-dialog", HiveLocalDialog], ["hive-local-card-editor", HiveLocalEditor]]) {
+  if (!customElements.get(name)) customElements.define(name, component);
+}
+window.customCards = window.customCards || [];
+if (!window.customCards.some((card) => card.type === "hive-local-card")) window.customCards.push({
+  type: "hive-local-card", name: "Hive Local Control", preview: true,
+  description: "Room temperature and heat boost, with schedules and holiday controls inside.",
+});

@@ -1,0 +1,14 @@
+.venv/
+node_modules/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+artifacts/
+dist/*
+!dist/hive-local-control.zip
+!dist/preview.html
+.idea/
+.env
+.env.*
+!.env.example
+

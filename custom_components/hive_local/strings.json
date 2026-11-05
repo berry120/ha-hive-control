@@ -1,0 +1,39 @@
+{
+  "title": "Hive Local Control",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect your Hive heating",
+        "description": "Pair the SLR1c receiver and SLT3b thermostat with each other and with ZHA before setup. Copy each device's IEEE address from its Device info page in Home Assistant. Both addresses are required; no defaults are supplied.",
+        "data": {
+          "name": "Name",
+          "receiver_ieee": "Receiver IEEE address",
+          "thermostat_ieee": "Wall thermostat IEEE address",
+          "boost_minutes": "Quick boost duration (minutes)",
+          "boost_temperature": "Quick boost target (°C, steps of 0.5)"
+        }
+      }
+    },
+    "error": {
+      "invalid_settings": "Check the addresses, name and boost values. Use different device addresses, 1–360 minutes and 5–32°C in half-degree steps.",
+      "receiver_not_found": "Cannot find the receiver's clusters on endpoint 5. Check the IEEE address and that ZHA has finished loading."
+    },
+    "abort": {"already_configured": "This receiver is already configured."}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Hive heating options",
+        "description": "Choose the wall thermostat and the defaults for your quick boost button.",
+        "data": {
+          "name": "Name",
+          "thermostat_ieee": "Wall thermostat IEEE address",
+          "boost_minutes": "Quick boost duration (minutes)",
+          "boost_temperature": "Quick boost target (°C, steps of 0.5)"
+        }
+      }
+    },
+    "error": {"invalid_settings": "Check the addresses, name and boost values. Use 1–360 minutes and 5–32°C in half-degree steps."}
+  }
+}
+
