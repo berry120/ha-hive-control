@@ -35,6 +35,19 @@ const tab = (name) => page.getByRole("tab", { name, exact: true }).click();
 const requests = () => page.evaluate(() => window.calls);
 const editWeekdays = async () => { await open(); await tab("Schedule"); await page.getByRole("button", { name: "Edit Weekdays", exact: true }).click(); };
 
+test("scheduled off shows a frost icon beside the target label", async () => {
+  await page.evaluate(() => {
+    window.demoHass.states["sensor.heating"].attributes.scheduled_off = true;
+    window.updateDemo();
+  });
+  const target = page.locator("hive-local-card .target");
+  assert.equal(await target.locator(".reading-label").textContent(), "Target");
+  const icon = target.locator('svg[aria-label="Frost"]');
+  assert.equal(await icon.count(), 1);
+  assert.equal(await icon.evaluate((element) => getComputedStyle(element).width), "20px");
+  assert.doesNotMatch(await target.textContent(), /scheduled off/i);
+});
+
 test("quick boost uses the configured receiver and ends to schedule", async () => {
   await page.getByRole("button", { name: "Heat boost", exact: true }).click();
   await page.getByRole("button", { name: "End boost", exact: true }).waitFor();
